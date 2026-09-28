@@ -51,6 +51,17 @@ Private Const REMOVE_CHARS_EVERYWHERE As String = "^" ' from every column
 Private Const DAY_FIRST As Boolean = False            ' False = MM-DD-YYYY, True = DD-MM-YYYY
 Private Const DATE_DISPLAY_FORMAT As String = "mm-dd-yyyy"
 
+' ---- Source.Name column (file name of each row, like Excel's "Combine Files") ----
+Private Const ADD_SOURCE_NAME As Boolean = True       ' added as the first column of the Combined file
+
+' ---- Sensitivity label applied to both saved files ----
+' Label IDs are unique to your company. To get them: open any Excel file that is
+' already labelled "Internal", then run macro  ShowSensitivityLabel  and copy the
+' two IDs it shows into the lines below.
+Private Const LABEL_NAME As String = "Internal"
+Private Const LABEL_ID As String = ""                 ' e.g. "a1b2c3d4-...."
+Private Const LABEL_SITE_ID As String = ""            ' e.g. "e5f6a7b8-...."
+
 '==============================================================================
 
 Public Sub RunExcelPipeline()
@@ -108,6 +119,7 @@ Public Sub RunExcelPipeline()
         If idx > 0 Then loC.ListColumns(idx).DataBodyRange.NumberFormat = DATE_DISPLAY_FORMAT
     End If
     combinedPath = combDir & "\Combined_" & tag & ".xlsx"
+    warnings = warnings & ApplySensitivityLabel(wbC)
     wbC.SaveAs Filename:=combinedPath, FileFormat:=xlOpenXMLWorkbook
     wbC.Close SaveChanges:=False
 
@@ -196,6 +208,7 @@ Public Sub RunExcelPipeline()
     Dim finalPath As String
     wsF.Columns.AutoFit
     finalPath = outDir & "\Final_" & tag & ".xlsx"
+    warnings = warnings & ApplySensitivityLabel(wbF)
     wbF.SaveAs Filename:=finalPath, FileFormat:=xlOpenXMLWorkbook
 
     Application.DisplayAlerts = True
@@ -248,7 +261,13 @@ Private Function BuildRawQuery(ByVal folder As String, ByVal days As Object) As 
     m = m & "    Source = Folder.Files(`" & folder & "`)," & vbLf
     m = m & "    ExcelFiles = Table.SelectRows(Source, each List.Contains({`.xlsx`, `.xlsm`, `.xls`}, Text.Lower([Extension])) and not Text.StartsWith([Name], `~$`))," & vbLf
     m = m & "    FirstSheet = (bin as binary) as table => let wb = Excel.Workbook(bin, true), sh = Table.SelectRows(wb, each [Kind] = `Sheet`) in sh{0}[Data]," & vbLf
-    m = m & "    Combined = Table.Combine(List.Transform(ExcelFiles[Content], FirstSheet))," & vbLf
+    If ADD_SOURCE_NAME Then
+        ' Source.Name = file name, first column (same as Excel's Get Data > Combine Files)
+        m = m & "    WithName = (f as record) as table => let t = FirstSheet(f[Content]) in Table.ReorderColumns(Table.AddColumn(t, `Source.Name`, each f[Name], type text), {`Source.Name`} & Table.ColumnNames(t))," & vbLf
+        m = m & "    Combined = Table.Combine(List.Transform(Table.ToRecords(ExcelFiles), WithName))," & vbLf
+    Else
+        m = m & "    Combined = Table.Combine(List.Transform(ExcelFiles[Content], FirstSheet))," & vbLf
+    End If
     m = m & MDateSteps("Combined", days)
     ' the date is only read to decide which rows to keep; no value is changed
     m = m & "    Filtered = Table.SelectRows(Combined, each List.Contains(Days, ToDate(Record.Field(_, DateCol))))" & vbLf
@@ -327,6 +346,52 @@ Private Sub CleanCharacters(ByVal rng As Range, ByVal phoneIdx As Long, ByVal da
         If c <> dateIdx Then rng.Columns(c).NumberFormat = "@"
     Next c
     rng.Value = arr
+End Sub
+
+'------------------------------------------------------------------------------
+' Sensitivity label (Microsoft 365). Returns "" on success, or a warning line.
+'------------------------------------------------------------------------------
+Private Function ApplySensitivityLabel(ByVal wb As Workbook) As String
+    Dim li As Object
+    If LABEL_ID = "" Or LABEL_SITE_ID = "" Then
+        ApplySensitivityLabel = "Sensitivity label NOT applied: set LABEL_ID and LABEL_SITE_ID in the SETTINGS (run ShowSensitivityLabel)." & vbLf
+        Exit Function
+    End If
+    On Error GoTo Failed
+    Set li = wb.SensitivityLabel.CreateLabelInfo()
+    li.AssignmentMethod = 1               ' msoAssignmentMethod PRIVILEGED (set by a program)
+    li.LabelId = LABEL_ID
+    li.LabelName = LABEL_NAME
+    li.SiteId = LABEL_SITE_ID
+    wb.SensitivityLabel.SetLabel li, li
+    Exit Function
+Failed:
+    ApplySensitivityLabel = "Sensitivity label NOT applied to " & wb.Name & ": " & Err.Description & vbLf
+End Function
+
+' Run this with a file that already has the "Internal" label open and active.
+' It shows the IDs to copy into LABEL_ID and LABEL_SITE_ID (also printed in the Immediate window, Ctrl+G).
+Public Sub ShowSensitivityLabel()
+    Dim li As Object
+    On Error GoTo Failed
+    Set li = ActiveWorkbook.SensitivityLabel.GetLabel()
+    If li.LabelId = "" Then
+        MsgBox "The active workbook (" & ActiveWorkbook.Name & ") has no sensitivity label." & vbLf & _
+               "Open a file labelled Internal, click into it, and run this again.", vbExclamation
+        Exit Sub
+    End If
+    Debug.Print "LABEL_NAME    = """ & li.LabelName & """"
+    Debug.Print "LABEL_ID      = """ & li.LabelId & """"
+    Debug.Print "LABEL_SITE_ID = """ & li.SiteId & """"
+    MsgBox "Workbook: " & ActiveWorkbook.Name & vbLf & vbLf & _
+           "LABEL_NAME = " & li.LabelName & vbLf & _
+           "LABEL_ID = " & li.LabelId & vbLf & _
+           "LABEL_SITE_ID = " & li.SiteId & vbLf & vbLf & _
+           "Also printed in the Immediate window (Ctrl+G in the VBA editor) for copying.", vbInformation
+    Exit Sub
+Failed:
+    MsgBox "Could not read the sensitivity label: " & Err.Description & vbLf & _
+           "Sensitivity labels need Microsoft 365 Excel with labels enabled by your company.", vbCritical
 End Sub
 
 '------------------------------------------------------------------------------
